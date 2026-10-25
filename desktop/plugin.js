@@ -76,7 +76,9 @@ const leftPct = w => Math.round(100 - clampPct(w.used_percent))
 
 const WINDOW_LABELS = {
   'current session': '5 hours',
-  'current week': 'Weekly'
+  session: '5 hours',
+  'current week': 'Weekly',
+  weekly: 'Weekly'
 }
 const windowLabel = label => WINDOW_LABELS[String(label || '').toLowerCase()] || label
 

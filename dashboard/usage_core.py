@@ -31,6 +31,7 @@ PRETTY = {
     "openrouter": "OpenRouter",
     "opencode-go": "OpenCode Go",
     "minimax-oauth": "MiniMax",
+    "kimi-coding": "Kimi",
     "nous": "Nous Portal",
 }
 
@@ -67,6 +68,7 @@ def _candidates() -> list[str]:
     configured = _configured_provider()
     if configured:
         names.append(configured)
+    names.extend(k for k in EXTRA_FETCHERS if _pool_key(k))
     seen: set[str] = set()
     return [n for n in names if n and not (n in seen or seen.add(n))]
 
@@ -113,8 +115,115 @@ def _diagnose(provider: str) -> Optional[str]:
         return msg[:240]
 
 
+def _pool_key(provider: str) -> Optional[str]:
+    try:
+        from agent.credential_pool import load_pool
+
+        pool = load_pool(provider)
+        entry = pool.select() if pool else None
+        if entry is None:
+            return None
+        return (getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", None) or "").strip() or None
+    except Exception:
+        return None
+
+
+def _http_json(url: str, key: str) -> dict:
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
+                                               "User-Agent": "hermes-plan-usage/0.2"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.load(resp)
+
+
+def _win(label: str, used_percent: float, resets_at: Optional[str], detail: Optional[str] = None) -> dict:
+    return {"label": label, "used_percent": round(max(0.0, min(100.0, float(used_percent))), 1),
+            "resets_at": resets_at, "detail": detail}
+
+
+def _extra_doc(provider: str, windows: list, details: Optional[list] = None, plan: Optional[str] = None) -> dict:
+    return {"provider": provider, "label": PRETTY.get(provider, provider), "available": True,
+            "title": "Account limits", "plan": plan, "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "windows": windows, "details": details or [], "unavailable_reason": None}
+
+
+def _fetch_kimi() -> Optional[dict]:
+    """Kimi Code plan: GET api.kimi.com/coding/v1/usages (undocumented; what Kimi CLI's /usage reads)."""
+    key = _pool_key("kimi-coding")
+    if not key:
+        return None
+    body = _http_json("https://api.kimi.com/coding/v1/usages", key)
+    windows = []
+    ratios = body.get("usages") or {}
+    if ratios:
+        for k, label in (("limit_5h", "Current session"), ("limit_7d", "Current week")):
+            r = ratios.get(k)
+            if isinstance(r, dict) and r.get("used_ratio") is not None:
+                windows.append(_win(label, float(r["used_ratio"]) * 100, r.get("reset_time")))
+    else:  # older response shape: counts
+        def pct(d):
+            limit = float(d.get("limit") or 0)
+            used = d.get("used")
+            used = float(used) if used is not None else limit - float(d.get("remaining") or 0)
+            return (used / limit * 100) if limit else 0.0
+        for entry in body.get("limits") or []:
+            d = entry.get("detail") or {}
+            windows.append(_win("Current session", pct(d), d.get("resetTime")))
+        if body.get("usage"):
+            windows.append(_win("Current week", pct(body["usage"]), body["usage"].get("resetTime")))
+    level = (((body.get("user") or {}).get("membership") or {}).get("level") or "").replace("LEVEL_", "").title() or None
+    return _extra_doc("kimi-coding", windows, plan=level)
+
+
+def _fetch_minimax() -> Optional[dict]:
+    """MiniMax token/coding plan: GET api.minimax.io/v1/token_plan/remains. Reports remaining %."""
+    key = _pool_key("minimax-oauth")
+    if not key:
+        return None
+    body = _http_json("https://api.minimax.io/v1/token_plan/remains", key)
+
+    def iso(ms):
+        try:
+            return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat()
+        except Exception:
+            return None
+
+    windows = []
+    for m in body.get("model_remains") or []:
+        if m.get("model_name") != "general":
+            continue
+        if m.get("current_interval_remaining_percent") is not None:
+            windows.append(_win("Current session", 100 - float(m["current_interval_remaining_percent"]), iso(m.get("end_time"))))
+        if m.get("current_weekly_remaining_percent") is not None:
+            windows.append(_win("Current week", 100 - float(m["current_weekly_remaining_percent"]), iso(m.get("weekly_end_time"))))
+    return _extra_doc("minimax-oauth", windows) if windows else None
+
+
+# Providers Hermes has no built-in usage fetcher for; these run in place of fetch_account_usage.
+EXTRA_FETCHERS = {"kimi-coding": _fetch_kimi, "minimax-oauth": _fetch_minimax}
+
+
 def _fetch_one(provider: str) -> dict[str, Any]:
     from agent.account_usage import fetch_account_usage
+
+    if provider in EXTRA_FETCHERS:
+        try:
+            out = EXTRA_FETCHERS[provider]()
+            err = None
+        except Exception as exc:
+            out, err = None, f"{type(exc).__name__}: {exc}"[:240]
+        if out is not None:
+            _last_good[provider] = out
+            return out
+        out = _doc(provider, None)
+        if err:
+            prev = _last_good.get(provider)
+            if prev is not None:
+                out = dict(prev, stale=True)
+            out["error"] = err
+        return out
 
     try:
         snap = fetch_account_usage(provider)
