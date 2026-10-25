@@ -214,6 +214,12 @@ function ProviderBlock({ p, now }) {
       ),
       p.unavailable_reason
         ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-orange)', children: p.unavailable_reason })
+        : null,
+      p.stale && p.error
+        ? jsx('div', {
+            className: 'text-[0.6875rem] text-(--ui-orange)',
+            children: `Showing last good numbers — latest fetch failed: ${p.error}`
+          })
         : null
     ]
   })
