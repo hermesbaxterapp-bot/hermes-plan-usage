@@ -108,6 +108,8 @@ def _diagnose(provider: str) -> Optional[str]:
         return None  # returned None without raising: no credential configured
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
+        if "no available" in msg.lower() and "credential" in msg.lower():
+            return None  # simply not signed in to this provider -- not an error worth showing
         return msg[:240]
 
 
