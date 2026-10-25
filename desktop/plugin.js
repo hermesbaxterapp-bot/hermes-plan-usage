@@ -13,6 +13,7 @@ import {
   Button,
   Codicon,
   host,
+  PALETTE_AREA,
   PANES_AREA,
   queryClient,
   Select,
@@ -54,6 +55,13 @@ async function forceRefresh() {
   } finally {
     $refreshing.set(false)
   }
+}
+
+const PANE_ID = `${ID}:pane`
+
+function showPane() {
+  if (typeof host.undismissPane === 'function') host.undismissPane(PANE_ID)
+  if (typeof host.revealPane === 'function') host.revealPane(PANE_ID)
 }
 
 function setIntervalMin(min) {
@@ -311,10 +319,13 @@ function StatusChip() {
   const minLeft = Math.min(...p.windows.map(leftPct))
   const tip = p.windows.map(w => `${windowLabel(w.label)}: ${leftPct(w)}% left`).join(' · ')
   return jsx(Tip, {
-    label: `${p.label} — ${tip}. Click to refresh.`,
+    label: `${p.label} — ${tip}. Click to open the pane and refresh.`,
     children: jsxs('button', {
       type: 'button',
-      onClick: forceRefresh,
+      onClick: () => {
+        showPane()
+        forceRefresh()
+      },
       className:
         'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
       style: minLeft <= 25 ? { color: barColor(minLeft) } : undefined,
@@ -346,6 +357,26 @@ export default {
         title: 'Plan usage',
         data: { placement: 'right', width: '280px' },
         render: () => jsx(UsagePane, {})
+      },
+      {
+        id: 'show',
+        area: PALETTE_AREA,
+        data: {
+          id: 'plan-usage.show',
+          label: 'Show plan usage',
+          keywords: ['plan', 'usage', 'limits', 'quota', 'claude', 'codex'],
+          run: showPane
+        }
+      },
+      {
+        id: 'refresh',
+        area: PALETTE_AREA,
+        data: {
+          id: 'plan-usage.refresh',
+          label: 'Refresh plan usage',
+          keywords: ['plan', 'usage', 'refresh'],
+          run: () => void forceRefresh()
+        }
       },
       {
         id: 'chip',
