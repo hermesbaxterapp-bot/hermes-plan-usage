@@ -1,0 +1,5 @@
+name: plan-usage
+kind: standalone
+version: "0.1.0"
+description: "Desktop pane + status chip showing subscription plan limits (5-hour / weekly windows, credits) for every provider that reports them."
+author: hermesbaxterapp-bot
