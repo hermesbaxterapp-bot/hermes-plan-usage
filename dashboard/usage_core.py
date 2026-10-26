@@ -120,10 +120,17 @@ def _pool_key(provider: str) -> Optional[str]:
         from agent.credential_pool import load_pool
 
         pool = load_pool(provider)
-        entry = pool.select() if pool else None
-        if entry is None:
+        if not pool:
             return None
-        return (getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", None) or "").strip() or None
+        # Read entries directly, NOT select(): a credential benched after a quota 429 is skipped by
+        # select(), which is exactly when the usage readout matters most.
+        for entry in [pool.peek(), *pool.entries()]:
+            if entry is None:
+                continue
+            key = (getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", None) or "").strip()
+            if key:
+                return key
+        return None
     except Exception:
         return None
 
@@ -266,6 +273,25 @@ def collect() -> dict[str, Any]:
         "configured_provider": configured,
         "providers": shown,
     }
+
+
+def session_provider(session_id: str) -> Optional[str]:
+    """Provider a stored session last ran on (state.db billing_provider)."""
+    if not session_id:
+        return None
+    try:
+        import sqlite3
+
+        from hermes_constants import get_hermes_home
+
+        con = sqlite3.connect(f"file:{get_hermes_home() / 'state.db'}?mode=ro", uri=True, timeout=2)
+        try:
+            row = con.execute("SELECT billing_provider FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        finally:
+            con.close()
+        return (row[0] or "").strip().lower() or None if row else None
+    except Exception:
+        return None
 
 
 def get(force: bool) -> dict[str, Any]:

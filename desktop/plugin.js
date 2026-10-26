@@ -318,24 +318,72 @@ function UsagePane() {
 
 // ── status-bar chip ─────────────────────────────────────────────────────────
 
+// Runtime session id → provider, fed by the gateway's session.info events
+// (stamped on every turn, and on a mid-session model switch).
+const $sessionProviders = atom({})
+
+function rememberProvider(sessionId, provider) {
+  if (!sessionId || typeof provider !== 'string' || !provider.trim()) return
+  const p = provider.trim().toLowerCase()
+  const map = $sessionProviders.get()
+  if (map[sessionId] !== p) $sessionProviders.set({ ...map, [sessionId]: p })
+}
+
+// Provider of the focused chat: live event map first, else ask session.status
+// once ("Model: <model> (<provider>)"), else the configured default.
+function useFocusedProvider(fallback) {
+  const focused = useValue(host.state.focusedSessionId)
+  const map = useValue($sessionProviders)
+  useEffect(() => {
+    if (!focused || map[focused]) return
+    let cancelled = false
+    Promise.resolve(host.request('session.status', { session_id: focused }))
+      .then(r => {
+        const m = /Model:\s*.*\(([^()]+)\)\s*$/m.exec(String(r?.output || ''))
+        if (!cancelled && m && !/unknown/i.test(m[1])) rememberProvider(focused, m[1])
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [focused, map[focused]])
+  return (focused && map[focused]) || fallback || null
+}
+
 function StatusChip() {
   const q = useUsage()
   const refreshing = useValue($refreshing)
-  const p = (q.data?.providers || []).find(x => x.available && (x.windows || []).length)
-  if (!p) return null
+  const providers = q.data?.providers || []
+  const want = useFocusedProvider(q.data?.configured_provider)
+  const p = providers.find(x => x.provider === want)
+  const onClick = () => {
+    showPane()
+    forceRefresh()
+  }
+  const cls =
+    'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground'
+  if (!q.data || !want) return null
+  if (!p || !p.available || !(p.windows || []).length) {
+    const name = p?.label || want
+    return jsx(Tip, {
+      label: `${name}: no plan usage reported for this session's provider. Click to open the pane.`,
+      children: jsxs('button', {
+        type: 'button',
+        onClick,
+        className: cls,
+        children: [jsx(Codicon, { name: 'dashboard', size: 12 }), `${name} —`]
+      })
+    })
+  }
   const parts = p.windows.slice(0, 2).map(w => `${leftPct(w)}%`)
   const minLeft = Math.min(...p.windows.map(leftPct))
   const tip = p.windows.map(w => `${windowLabel(w.label)}: ${leftPct(w)}% left`).join(' · ')
   return jsx(Tip, {
-    label: `${p.label} — ${tip}. Click to open the pane and refresh.`,
+    label: `${p.label} (this session) — ${tip}. Click to open the pane and refresh.`,
     children: jsxs('button', {
       type: 'button',
-      onClick: () => {
-        showPane()
-        forceRefresh()
-      },
-      className:
-        'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+      onClick,
+      className: cls,
       style: minLeft <= 25 ? { color: barColor(minLeft) } : undefined,
       children: [
         jsx(Codicon, { name: refreshing ? 'sync' : 'dashboard', spinning: refreshing, size: 12 }),
@@ -358,6 +406,7 @@ export default {
       rest = null
       storage = null
     })
+    ctx.onEvent('session.info', ev => rememberProvider(ev?.session_id, ev?.payload?.provider))
     ctx.registerMany([
       {
         id: 'pane',
