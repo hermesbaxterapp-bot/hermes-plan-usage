@@ -239,8 +239,48 @@ def _fetch_nous() -> Optional[dict]:
     return doc
 
 
-# Providers Hermes has no built-in usage fetcher for; these run in place of fetch_account_usage.
-EXTRA_FETCHERS = {"kimi-coding": _fetch_kimi, "minimax-oauth": _fetch_minimax, "nous": _fetch_nous}
+def _fetch_anthropic() -> Optional[dict]:
+    """Claude plan limits. Replaces Hermes' parser, which scales utilization <= 1 by 100 (so 1% reads 100%).
+    Prefers the payload's ``limits`` list (integer percents, includes per-model weekly caps)."""
+    from agent import account_usage as au
+
+    tok = (au.resolve_anthropic_token() or "").strip()
+    if not tok or not au._is_oauth_token(tok):
+        return None
+    headers = {"Authorization": f"Bearer {tok}", "Accept": "application/json", "Content-Type": "application/json",
+               "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"}
+    p = au._get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
+    windows = []
+    for lim in p.get("limits") or []:
+        if lim.get("percent") is None:
+            continue
+        kind = lim.get("kind") or ""
+        model = (((lim.get("scope") or {}).get("model") or {}).get("display_name") or "").strip()
+        if kind == "session":
+            label = "Current session"
+        elif kind == "weekly_all":
+            label = "Current week"
+        elif model:
+            label = f"Weekly · {model}"
+        else:
+            label = kind.replace("_", " ").title()
+        windows.append(_win(label, float(lim["percent"]), lim.get("resets_at")))
+    if not windows:  # older payload: utilization is already a percent — never rescale
+        for key, label in (("five_hour", "Current session"), ("seven_day", "Current week"),
+                           ("seven_day_opus", "Weekly · Opus"), ("seven_day_sonnet", "Weekly · Sonnet")):
+            w = p.get(key) or {}
+            if w.get("utilization") is not None:
+                windows.append(_win(label, float(w["utilization"]), w.get("resets_at")))
+    details = []
+    extra = p.get("extra_usage") or {}
+    if extra.get("is_enabled") and extra.get("used_credits") is not None and extra.get("monthly_limit") is not None:
+        details.append(f"Extra usage: {extra['used_credits']:.2f} / {extra['monthly_limit']:.2f} {extra.get('currency') or 'USD'}")
+    return _extra_doc("anthropic", windows, details) if windows else None
+
+
+# Providers Hermes has no (correct) built-in usage fetcher for; these run in place of fetch_account_usage.
+EXTRA_FETCHERS = {"kimi-coding": _fetch_kimi, "minimax-oauth": _fetch_minimax, "nous": _fetch_nous,
+                  "anthropic": _fetch_anthropic}
 
 
 def _fetch_one(provider: str) -> dict[str, Any]:
