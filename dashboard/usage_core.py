@@ -68,7 +68,14 @@ def _candidates() -> list[str]:
     configured = _configured_provider()
     if configured:
         names.append(configured)
-    names.extend(k for k in EXTRA_FETCHERS if _pool_key(k))
+    names.extend(k for k in EXTRA_FETCHERS if k != "nous" and _pool_key(k))
+    try:
+        from agent.account_usage import _nous_logged_in
+
+        if _nous_logged_in():
+            names.append("nous")
+    except Exception:
+        pass
     seen: set[str] = set()
     return [n for n in names if n and not (n in seen or seen.add(n))]
 
@@ -208,8 +215,32 @@ def _fetch_minimax() -> Optional[dict]:
     return _extra_doc("minimax-oauth", windows) if windows else None
 
 
+def _fetch_nous() -> Optional[dict]:
+    """Nous Portal subscription: Hermes' own portal-account fetch (same numbers as /usage, /topup)."""
+    from agent import account_usage as au
+
+    if not au._nous_logged_in():
+        return None
+    snap = au.build_nous_credits_snapshot(au._fetch_portal_account(15.0))
+    if snap is None:
+        return None
+    doc = _doc("nous", snap)
+    renews = None
+    details = []
+    for d in doc["details"]:
+        if d.startswith("Renews:"):
+            renews = d.split(":", 1)[1].strip()
+        elif not d.lstrip().startswith(("Top up", "(or run", "Subscription credits", "Total usable")):
+            details.append(d)
+    doc["details"] = details
+    for w in doc["windows"]:
+        if not w.get("resets_at") and renews:
+            w["resets_at"] = renews  # monthly credits refill at renewal
+    return doc
+
+
 # Providers Hermes has no built-in usage fetcher for; these run in place of fetch_account_usage.
-EXTRA_FETCHERS = {"kimi-coding": _fetch_kimi, "minimax-oauth": _fetch_minimax}
+EXTRA_FETCHERS = {"kimi-coding": _fetch_kimi, "minimax-oauth": _fetch_minimax, "nous": _fetch_nous}
 
 
 def _fetch_one(provider: str) -> dict[str, Any]:
