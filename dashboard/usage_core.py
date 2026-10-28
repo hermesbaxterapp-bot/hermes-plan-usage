@@ -278,9 +278,36 @@ def _fetch_anthropic() -> Optional[dict]:
     return _extra_doc("anthropic", windows, details) if windows else None
 
 
+def _fetch_codex() -> Optional[dict]:
+    """Codex windows. Hermes' fetcher only uses credentials select() returns, so a key benched after a
+    quota 429 hides Codex exactly when it is maxed out; fall back to a read-only fetch on the pooled
+    entry itself (read_only: never refreshes or rotates the credential)."""
+    from agent import account_usage as au
+
+    snap = au.fetch_account_usage("openai-codex")
+    if snap is None:
+        try:
+            from agent.credential_pool import load_pool
+
+            pool = load_pool("openai-codex")
+            entries = [e for e in ([pool.peek(), *pool.entries()] if pool else []) if e is not None]
+        except Exception:
+            entries = []
+        for e in entries:
+            key = (getattr(e, "runtime_api_key", None) or "").strip()
+            if key:
+                snap = au._fetch_codex_account_usage_read_only(getattr(e, "runtime_base_url", None), key)
+                break
+    if snap is None:
+        return None
+    doc = _doc("openai-codex", snap)
+    doc["details"] = [d.replace(" - use /usage reset to activate", " (use /usage reset)") for d in doc["details"]]
+    return doc
+
+
 # Providers Hermes has no (correct) built-in usage fetcher for; these run in place of fetch_account_usage.
 EXTRA_FETCHERS = {"kimi-coding": _fetch_kimi, "minimax-oauth": _fetch_minimax, "nous": _fetch_nous,
-                  "anthropic": _fetch_anthropic}
+                  "anthropic": _fetch_anthropic, "openai-codex": _fetch_codex}
 
 
 def _fetch_one(provider: str) -> dict[str, Any]:
