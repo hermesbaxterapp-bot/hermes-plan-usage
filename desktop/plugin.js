@@ -111,6 +111,68 @@ function agoText(iso, now) {
 const barColor = left =>
   left <= 10 ? 'var(--ui-red)' : left <= 25 ? 'var(--ui-orange)' : 'var(--ui-text-tertiary)'
 
+const SHORT_LABELS = { '5 hours': '5h', Weekly: 'wk', Monthly: 'mo', Subscription: 'sub' }
+const shortLabel = w => SHORT_LABELS[windowLabel(w.label)] || windowLabel(w.label)
+
+// Per-provider derived state:
+//   short   — the shortest window (5 hours where present, else the first reported)
+//   blocked — any window at 0% left: the provider is unusable until the LATEST such window resets
+//   warn    — a longer window that is lower than `short` and ≤ 25% left (the binding constraint)
+function providerState(p) {
+  const ws = (p.available && p.windows) || []
+  const short = ws.find(w => windowLabel(w.label) === '5 hours') || ws[0] || null
+  const exhausted = ws.filter(w => leftPct(w) <= 0)
+  const blocker = exhausted.length
+    ? exhausted.reduce((a, b) => (new Date(b.resets_at || 0) > new Date(a.resets_at || 0) ? b : a))
+    : null
+  const others = ws.filter(w => w !== short)
+  const lowest = others.length ? others.reduce((a, b) => (leftPct(b) < leftPct(a) ? b : a)) : null
+  const warn = lowest && short && leftPct(lowest) < leftPct(short) && leftPct(lowest) <= 25 ? lowest : null
+  return { short, blocked: Boolean(blocker), blocker, warn }
+}
+
+function untilText(iso, now, compact = false) {
+  if (!iso) return compact ? 'blocked' : 'reset time unknown'
+  const at = new Date(iso)
+  const ms = at.getTime() - now
+  if (Number.isNaN(ms) || ms <= 0) return compact ? 'resetting…' : 'resetting now'
+  const mins = Math.round(ms / 60000)
+  let s
+  if (ms < 24 * 3600 * 1000) s = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`
+  else {
+    const day = at.toLocaleDateString(undefined, { weekday: 'short' })
+    const time = at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
+    s = `${day} ${time}`
+  }
+  if (compact) return ms < 24 * 3600 * 1000 ? `back in ${s}` : `back ${s}`
+  return ms < 24 * 3600 * 1000 ? `available again in ${s}` : `available again ${s}`
+}
+
+// Expanded providers (default collapsed), persisted per desktop.
+const $expanded = atom({})
+function setExpanded(provider, open) {
+  const next = { ...$expanded.get(), [provider]: open }
+  if (!open) delete next[provider]
+  $expanded.set(next)
+  storage?.set('expanded', next)
+}
+function setAllExpanded(providers, open) {
+  const next = open ? Object.fromEntries(providers.map(p => [p.provider, true])) : {}
+  $expanded.set(next)
+  storage?.set('expanded', next)
+}
+
+// Usable first, then blocked, then providers with no numbers; alphabetical within each group so rows
+// don't jump around on every refresh.
+function sortProviders(list) {
+  const rank = p => {
+    const st = providerState(p)
+    if (!p.available || !st.short) return 2
+    return st.blocked ? 1 : 0
+  }
+  return [...list].sort((a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label))
+}
+
 // ── data hooks ──────────────────────────────────────────────────────────────
 
 function useUsage() {
@@ -178,12 +240,31 @@ function WindowRow({ w, now }) {
 }
 
 function ProviderBlock({ p, now }) {
-  const header = jsxs('div', {
-    className: 'flex items-center gap-2',
+  const expanded = useValue($expanded)[p.provider] === true
+  const st = providerState(p)
+  const toggle = () => setExpanded(p.provider, !expanded)
+
+  const header = jsxs('button', {
+    type: 'button',
+    onClick: toggle,
+    'aria-expanded': expanded,
+    className: 'flex w-full items-center gap-2 text-left',
     children: [
-      jsx('span', { className: 'font-medium text-(--ui-text-primary)', children: p.label }),
-      p.plan ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: p.plan }) : null,
-      p.configured
+      jsx(Codicon, {
+        name: expanded ? 'chevron-down' : 'chevron-right',
+        size: 12,
+        className: 'text-(--ui-text-tertiary)'
+      }),
+      jsx('span', {
+        className: 'shrink-0 font-medium text-(--ui-text-primary)',
+        style: st.blocked ? { textDecoration: 'line-through', color: 'var(--ui-red)' } : undefined,
+        children: p.label
+      }),
+      expanded && p.plan
+        ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: p.plan })
+        : null,
+      expanded ? null : jsx(CollapsedSummary, { p, st, now }),
+      expanded && p.configured
         ? jsx('span', {
             className: 'ml-auto rounded px-1 text-[0.625rem] uppercase tracking-wide text-(--ui-text-tertiary)',
             style: { border: '1px solid var(--ui-stroke-secondary)' },
@@ -192,6 +273,8 @@ function ProviderBlock({ p, now }) {
         : null
     ]
   })
+
+  if (!expanded) return header
 
   if (!p.available) {
     return jsxs('div', {
@@ -210,6 +293,13 @@ function ProviderBlock({ p, now }) {
     className: 'flex flex-col gap-2.5',
     children: [
       header,
+      st.blocked
+        ? jsx('div', {
+            className: 'rounded px-2 py-1 text-[0.6875rem]',
+            style: { color: 'var(--ui-red)', border: '1px solid var(--ui-red)' },
+            children: `Blocked — ${windowLabel(st.blocker.label).toLowerCase()} limit hit, ${untilText(st.blocker.resets_at, now)}`
+          })
+        : null,
       ...(p.windows || []).map((w, i) => jsx(WindowRow, { w, now }, `w${i}`)),
       ...(p.details || []).map((d, i) =>
         jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: d }, `d${i}`)
@@ -223,6 +313,48 @@ function ProviderBlock({ p, now }) {
             children: `Showing last good numbers — latest fetch failed: ${p.error}`
           })
         : null
+    ]
+  })
+}
+
+// One-line summary for a collapsed provider: the shortest window's bar (5 hours where there is one).
+// A blocked provider (any window at 0%) goes red and says when it frees up; a longer window that is
+// running low gets a small warning tag so the 5-hour bar can't hide it.
+function CollapsedSummary({ p, st, now }) {
+  if (!p.available || !st.short) {
+    return jsx('span', {
+      className: 'ml-auto truncate text-[0.6875rem] text-(--ui-text-quaternary)',
+      children: p.error ? 'fetch failed' : 'no usage endpoint'
+    })
+  }
+  const left = leftPct(st.short)
+  const tail = st.blocked
+    ? jsx('span', {
+        className: 'shrink-0 text-[0.6875rem] tabular-nums',
+        style: { color: 'var(--ui-red)' },
+        children: untilText(st.blocker.resets_at, now, true)
+      })
+    : jsxs('span', {
+        className: 'flex shrink-0 items-center gap-1 text-[0.6875rem] tabular-nums text-(--ui-text-secondary)',
+        children: [
+          st.warn
+            ? jsx('span', {
+                style: { color: barColor(leftPct(st.warn)) },
+                children: `${shortLabel(st.warn)} ${leftPct(st.warn)}%`
+              })
+            : null,
+          jsx('span', { style: left <= 25 ? { color: barColor(left) } : undefined, children: `${left}%` })
+        ]
+      })
+  return jsxs('span', {
+    className: 'ml-auto flex min-w-0 flex-1 items-center gap-2 pl-1',
+    children: [
+      jsx('span', {
+        className: 'min-w-0 flex-1',
+        style: st.blocked ? { opacity: 0.45 } : undefined,
+        children: jsx(Bar, { left: st.blocked ? 0 : left })
+      }),
+      tail
     ]
   })
 }
@@ -282,19 +414,23 @@ function UsagePane() {
   } else if (!providers.length) {
     body = jsx('div', { className: 'text-(--ui-text-tertiary)', children: 'No provider reports plan usage.' })
   } else {
-    body = providers.map((p, i) =>
-      jsxs(
-        'div',
-        {
-          className: 'flex flex-col',
-          children: [
-            i > 0 ? jsx('div', { className: 'mb-3 h-px', style: { background: 'var(--ui-stroke-tertiary)' } }) : null,
-            jsx(ProviderBlock, { p, now })
-          ]
-        },
-        p.provider
+    const sorted = sortProviders(providers)
+    body = jsx('div', {
+      className: 'flex flex-col gap-2',
+      children: sorted.map((p, i) =>
+        jsxs(
+          'div',
+          {
+            className: 'flex flex-col',
+            children: [
+              i > 0 ? jsx('div', { className: 'mb-2 h-px', style: { background: 'var(--ui-stroke-tertiary)' } }) : null,
+              jsx(ProviderBlock, { p, now })
+            ]
+          },
+          p.provider
+        )
       )
-    )
+    })
   }
 
   return jsxs('div', {
@@ -307,12 +443,28 @@ function UsagePane() {
             className: 'mr-auto text-[0.6875rem] text-(--ui-text-tertiary)',
             children: data?.fetched_at ? `Updated ${agoText(data.fetched_at, now)}` : ''
           }),
+          jsx(ExpandAllButton, { providers }),
           jsx(IntervalPicker, {}),
           jsx(RefreshButton, {})
         ]
       }),
       body
     ]
+  })
+}
+
+function ExpandAllButton({ providers }) {
+  const expanded = useValue($expanded)
+  const anyOpen = providers.some(p => expanded[p.provider])
+  return jsx(Tip, {
+    label: anyOpen ? 'Collapse all' : 'Expand all',
+    children: jsx(Button, {
+      'aria-label': anyOpen ? 'Collapse all providers' : 'Expand all providers',
+      size: 'icon-xs',
+      variant: 'ghost',
+      onClick: () => setAllExpanded(providers, !anyOpen),
+      children: jsx(Codicon, { name: anyOpen ? 'collapse-all' : 'expand-all' })
+    })
   })
 }
 
@@ -377,17 +529,27 @@ function StatusChip() {
   }
   const parts = p.windows.slice(0, 2).map(w => `${leftPct(w)}%`)
   const minLeft = Math.min(...p.windows.map(leftPct))
+  const st = providerState(p)
   const tip = p.windows.map(w => `${windowLabel(w.label)}: ${leftPct(w)}% left`).join(' · ')
+  const now = Date.now()
   return jsx(Tip, {
-    label: `${p.label} (this session) — ${tip}. Click to open the pane and refresh.`,
+    label: st.blocked
+      ? `${p.label} (this session) is BLOCKED — ${windowLabel(st.blocker.label).toLowerCase()} limit hit, ${untilText(st.blocker.resets_at, now)}. ${tip}.`
+      : `${p.label} (this session) — ${tip}. Click to open the pane and refresh.`,
     children: jsxs('button', {
       type: 'button',
       onClick,
       className: cls,
-      style: minLeft <= 25 ? { color: barColor(minLeft) } : undefined,
+      style: st.blocked
+        ? { color: 'var(--ui-red)' }
+        : minLeft <= 25
+          ? { color: barColor(minLeft) }
+          : undefined,
       children: [
-        jsx(Codicon, { name: refreshing ? 'sync' : 'dashboard', spinning: refreshing, size: 12 }),
-        `${p.label} ${parts.join(' · ')}`
+        jsx(Codicon, { name: refreshing ? 'sync' : st.blocked ? 'circle-slash' : 'dashboard', spinning: refreshing, size: 12 }),
+        st.blocked
+          ? `${p.label} blocked · ${untilText(st.blocker.resets_at, now, true)}`
+          : `${p.label} ${parts.join(' · ')}`
       ]
     })
   })
@@ -402,6 +564,8 @@ export default {
     storage = ctx.storage
     const saved = Number(ctx.storage.get('intervalMin', DEFAULT_INTERVAL))
     $intervalMin.set(INTERVALS.includes(saved) ? saved : DEFAULT_INTERVAL)
+    const savedExpanded = ctx.storage.get('expanded', {})
+    $expanded.set(savedExpanded && typeof savedExpanded === 'object' ? savedExpanded : {})
     ctx.onDispose(() => {
       rest = null
       storage = null
