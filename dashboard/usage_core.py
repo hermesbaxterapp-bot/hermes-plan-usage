@@ -32,6 +32,7 @@ PRETTY = {
     "opencode-go": "OpenCode Go",
     "minimax-oauth": "MiniMax",
     "kimi-coding": "Kimi",
+    "xai-oauth": "Grok",
     "nous": "Nous Portal",
 }
 
@@ -305,9 +306,44 @@ def _fetch_codex() -> Optional[dict]:
     return doc
 
 
+def _fetch_xai() -> Optional[dict]:
+    """SuperGrok / xai-oauth weekly credits pool: GET cli-chat-proxy.grok.com/v1/billing?format=credits
+    (the meter Grok Build shows; undocumented). creditUsagePercent is already a percent; protobuf JSON
+    omits zero fields, so an absent value with a current period means 0%."""
+    key = _pool_key("xai-oauth")
+    if not key:
+        return None
+    import json
+    import urllib.request
+
+    headers = {"Authorization": f"Bearer {key}", "Accept": "application/json", "User-Agent": "hermes-plan-usage/0.3",
+               "x-grok-client-surface": "grok-build", "x-grok-client-version": "1.0.0"}
+
+    def get(url, timeout):
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as r:
+            return json.load(r)
+
+    cfg = (get("https://cli-chat-proxy.grok.com/v1/billing?format=credits", 15) or {}).get("config") or {}
+    period = cfg.get("currentPeriod") or {}
+    if not period and "creditUsagePercent" not in cfg:
+        return None
+    ptype = str(period.get("type") or "").upper()
+    label = "Current week" if "WEEK" in ptype else "Monthly" if "MONTH" in ptype else "Daily" if "DAY" in ptype else "Period"
+    windows = [_win(label, float(cfg.get("creditUsagePercent") or 0), period.get("end") or cfg.get("billingPeriodEnd"))]
+    plan = None
+    try:  # subscription tier only refines the label
+        subs = get("https://grok.com/rest/subscriptions", 5).get("subscriptions") or []
+        active = next((s for s in subs if s.get("status") == "SUBSCRIPTION_STATUS_ACTIVE"), None)
+        if active and active.get("tier"):
+            plan = str(active["tier"]).replace("SUBSCRIPTION_TIER_", "").replace("_", " ").title()
+    except Exception:
+        pass
+    return _extra_doc("xai-oauth", windows, plan=plan)
+
+
 # Providers Hermes has no (correct) built-in usage fetcher for; these run in place of fetch_account_usage.
 EXTRA_FETCHERS = {"kimi-coding": _fetch_kimi, "minimax-oauth": _fetch_minimax, "nous": _fetch_nous,
-                  "anthropic": _fetch_anthropic, "openai-codex": _fetch_codex}
+                  "anthropic": _fetch_anthropic, "openai-codex": _fetch_codex, "xai-oauth": _fetch_xai}
 
 
 def _fetch_one(provider: str) -> dict[str, Any]:
