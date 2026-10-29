@@ -114,21 +114,54 @@ const barColor = left =>
 const SHORT_LABELS = { '5 hours': '5h', Weekly: 'wk', Monthly: 'mo', Subscription: 'sub' }
 const shortLabel = w => SHORT_LABELS[windowLabel(w.label)] || windowLabel(w.label)
 
-// Per-provider derived state:
-//   short   — the shortest window (5 hours where present, else the first reported)
-//   blocked — any window at 0% left: the provider is unusable until the LATEST such window resets
-//   warn    — a longer window that is lower than `short` and ≤ 25% left (the binding constraint)
+// Per-provider derived state. Windows are grouped by quota pool: Antigravity reports independent
+// pools ("Gemini 5h", "Claude/GPT 7d"), Claude a model-scoped "Weekly · Fable"; a plain
+// "5 hours"/"Weekly" belongs to the account pool ''. A pool is blocked when any of its windows is at
+// 0%; the PROVIDER is blocked only when every pool is (one pool running dry leaves the others usable).
+//   short        — the bar shown collapsed: tightest 5h window among usable pools, else the first window
+//   blocked      — every pool blocked; blocker = the window whose reset frees the first pool
+//   blockedPools — names of blocked pools while others are still usable
+//   warn         — a longer window lower than `short` and ≤ 25% left (the binding constraint)
+const isShortWindow = w => {
+  const l = windowLabel(w.label)
+  return l === '5 hours' || /\b5h$/i.test(l)
+}
+const poolOf = w =>
+  windowLabel(w.label)
+    .replace(/^Weekly · /, '')
+    .replace(/\s*\b(5h|7d|24h|1d)$/i, '')
+    .replace(/^(5 hours|Weekly|Monthly|Daily|Today|Subscription|Current week|Current session)$/i, '')
+
 function providerState(p) {
   const ws = (p.available && p.windows) || []
-  const short = ws.find(w => windowLabel(w.label) === '5 hours') || ws[0] || null
-  const exhausted = ws.filter(w => leftPct(w) <= 0)
-  const blocker = exhausted.length
-    ? exhausted.reduce((a, b) => (new Date(b.resets_at || 0) > new Date(a.resets_at || 0) ? b : a))
+  const pools = new Map()
+  for (const w of ws) {
+    const k = poolOf(w)
+    if (!pools.has(k)) pools.set(k, [])
+    pools.get(k).push(w)
+  }
+  const latest = list => list.reduce((a, b) => (new Date(b.resets_at || 0) > new Date(a.resets_at || 0) ? b : a))
+  const blockedPools = new Map() // pool → window whose reset unblocks it
+  for (const [k, list] of pools) {
+    const dead = list.filter(w => leftPct(w) <= 0)
+    if (dead.length) blockedPools.set(k, latest(dead))
+  }
+  const usable = blockedPools.has('') ? [] : ws.filter(w => !blockedPools.has(poolOf(w)))
+  const blocked = ws.length > 0 && usable.length === 0
+  const blocker = blocked
+    ? blockedPools.get('') ||
+      [...blockedPools.values()].reduce((a, b) => (new Date(b.resets_at || 0) < new Date(a.resets_at || 0) ? b : a))
     : null
-  const others = ws.filter(w => w !== short)
+  const pickFrom = blocked ? ws : usable
+  const shorts = pickFrom.filter(isShortWindow)
+  const short = shorts.length
+    ? shorts.reduce((a, b) => (leftPct(b) < leftPct(a) ? b : a))
+    : pickFrom[0] || null
+  const others = usable.filter(w => w !== short)
   const lowest = others.length ? others.reduce((a, b) => (leftPct(b) < leftPct(a) ? b : a)) : null
-  const warn = lowest && short && leftPct(lowest) < leftPct(short) && leftPct(lowest) <= 25 ? lowest : null
-  return { short, blocked: Boolean(blocker), blocker, warn }
+  const warn = !blocked && lowest && short && leftPct(lowest) < leftPct(short) && leftPct(lowest) <= 25 ? lowest : null
+  const partial = blocked ? [] : [...blockedPools.keys()].map(k => k || 'main')
+  return { short, blocked, blocker, warn, blockedPools: partial }
 }
 
 function untilText(iso, now, compact = false) {
@@ -300,6 +333,13 @@ function ProviderBlock({ p, now }) {
             children: `Blocked — ${windowLabel(st.blocker.label).toLowerCase()} limit hit, ${untilText(st.blocker.resets_at, now)}`
           })
         : null,
+      st.blockedPools.length
+        ? jsx('div', {
+            className: 'text-[0.6875rem]',
+            style: { color: 'var(--ui-red)' },
+            children: `${st.blockedPools.join(', ')} quota used up — other models still available`
+          })
+        : null,
       ...(p.windows || []).map((w, i) => jsx(WindowRow, { w, now }, `w${i}`)),
       ...(p.details || []).map((d, i) =>
         jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: d }, `d${i}`)
@@ -337,6 +377,9 @@ function CollapsedSummary({ p, st, now }) {
     : jsxs('span', {
         className: 'flex shrink-0 items-center gap-1 text-[0.6875rem] tabular-nums text-(--ui-text-secondary)',
         children: [
+          ...st.blockedPools.map(name =>
+            jsx('span', { key: `b-${name}`, style: { color: 'var(--ui-red)', textDecoration: 'line-through' }, children: name })
+          ),
           st.warn
             ? jsx('span', {
                 style: { color: barColor(leftPct(st.warn)) },

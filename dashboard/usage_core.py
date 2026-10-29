@@ -33,6 +33,7 @@ PRETTY = {
     "minimax-oauth": "MiniMax",
     "kimi-coding": "Kimi",
     "xai-oauth": "Grok",
+    "antigravity-oauth": "Antigravity",
     "nous": "Nous Portal",
 }
 
